@@ -92,7 +92,8 @@ fn handle_message(msg: Message, client_map: &mut HashMap<usize, TcpStream>) {
                 if *client_id == id {
                     continue;
                 } else {
-                    let msg = format!("client {} : ", id) + &msg;
+                    let mut msg = format!("client {} : ", id) + &msg;
+                    msg.push('}');
                     client_stream
                         .write_all(msg.as_bytes())
                         .expect("Failed to write message");
