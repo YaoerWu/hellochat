@@ -32,7 +32,7 @@ fn main() {
                     let client_id = get_client_id();
                     tx.send(Message::Connection(
                         client_id,
-                        stream.try_clone().expect("Can't clone stream"),
+                        stream.try_clone().expect("Failed to clone stream"),
                     ))
                     .expect("Failed to send message");
                     let client_tx = tx.clone();
