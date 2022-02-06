@@ -41,8 +41,8 @@ fn main() {
                     thread::spawn(move || {
                         let mut reader = BufReader::new(stream);
                         loop {
-                            let mut buf = vec![];
-                            match reader.read_until(b'}', &mut buf) {
+                            let mut buf = String::new();
+                            match reader.read_line(&mut buf) {
                                 Err(_) | Ok(0) => {
                                     client_tx
                                         .send(Message::ConnectionReset(client_id))
@@ -50,10 +50,7 @@ fn main() {
                                     break;
                                 }
                                 Ok(_) => client_tx
-                                    .send(Message::Client(
-                                        client_id,
-                                        String::from_utf8(buf).expect("Convert failed"),
-                                    ))
+                                    .send(Message::Client(client_id, buf))
                                     .expect("Unreachable message"),
                             };
                         }
@@ -84,18 +81,19 @@ fn handle_message(msg: Message, client_map: &mut HashMap<usize, TcpStream>) {
             client_map.remove(&client_id);
             println!("client {} disconnected", client_id);
         }
-        Message::Client(id, mut msg) => {
-            msg.pop();
+        Message::Client(id, msg) => {
+            let msg = msg.trim();
             println!("Message from client {} : {}", id, msg);
             for client in client_map.iter() {
                 let (client_id, mut client_stream) = client;
                 if *client_id == id {
                     continue;
                 } else {
-                    let mut msg = format!("client {} : ", id) + &msg;
-                    msg.push('}');
+                    let msg = format!("client {} : ", id) + msg;
+                    let mut buf = Vec::from(msg);
+                    buf.push(0xa);
                     client_stream
-                        .write_all(msg.as_bytes())
+                        .write_all(&buf)
                         .expect("Failed to write message");
                     println!("Message sent to client : {}", client_id);
                 }

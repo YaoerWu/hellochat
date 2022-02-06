@@ -9,16 +9,15 @@ fn main() {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
 
     thread::spawn(move || loop {
-        let mut buf = vec![];
-        match reader.read_until(b'}', &mut buf) {
+        let mut buf = String::new();
+        match reader.read_line(&mut buf) {
             Err(_) | Ok(0) => {
                 println!("Connection reset by remote");
                 break;
             }
             Ok(_) => {
-                let mut msg = String::from_utf8(buf).expect("Convert failed");
-                msg.pop();
-                println!("{}", msg);
+                let msg = buf;
+                println!("{}", msg.trim());
             }
         }
     });
@@ -28,7 +27,8 @@ fn main() {
             .read_line(&mut msg)
             .expect("Failed to read line");
         msg = msg.trim().to_string();
-        msg.push('}');
-        stream.write_all(msg.as_bytes()).unwrap();
+        let mut buf = Vec::from(msg);
+        buf.push(0xa);
+        stream.write_all(&buf).unwrap();
     }
 }
