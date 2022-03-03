@@ -1,23 +1,25 @@
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::TcpStream;
-use std::thread;
+use std::io;
+use tokio::net::TcpStream;
 
 const REMOTE_HOST: &str = "127.0.0.1:8888";
 
-fn main() {
-    let mut stream = TcpStream::connect(REMOTE_HOST).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
+#[tokio::main]
+async fn main() {
+    let stream = TcpStream::connect(REMOTE_HOST).await.unwrap();
+    let (reader, writer) = stream.into_split();
 
-    thread::spawn(move || loop {
-        let mut buf = String::new();
-        match reader.read_line(&mut buf) {
-            Err(_) | Ok(0) => {
-                println!("Connection reset by remote");
-                break;
-            }
-            Ok(_) => {
-                let msg = buf;
-                println!("{}", msg.trim());
+    tokio::spawn(async move {
+        loop {
+            let mut buf = vec![];
+            match reader.try_read(&mut buf) {
+                Err(_) | Ok(0) => {
+                    println!("Connection reset by remote");
+                    break;
+                }
+                Ok(_) => {
+                    let msg = buf;
+                    println!("{}", String::from_utf8(msg).unwrap().trim());
+                }
             }
         }
     });
@@ -29,6 +31,6 @@ fn main() {
         msg = msg.trim().to_string();
         let mut buf = Vec::from(msg);
         buf.push(0xa);
-        stream.write_all(&buf).unwrap();
+        writer.try_write(&buf).unwrap();
     }
 }

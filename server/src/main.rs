@@ -1,62 +1,71 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc;
-use std::thread;
-
-const LOCAL_HOST: &str = "127.0.0.1:8888";
+use tokio::net::{tcp::OwnedWriteHalf, TcpListener};
+use tokio::sync::mpsc;
 
 enum Message {
-    Connection(usize, TcpStream),
+    Connection(usize, OwnedWriteHalf),
     ConnectionReset(usize),
     Client(usize, String),
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
+    const LOCAL_HOST: &str = "SomeIPAddr";
     //Initialzation
-    let listener = TcpListener::bind(LOCAL_HOST).expect("Fail to bind socket");
+    let listener = TcpListener::bind(LOCAL_HOST)
+        .await
+        .expect("Fail to bind socket");
     println!("Listener up and running");
-    let (tx, rx) = mpsc::channel();
+    let (tx, mut rx) = mpsc::channel(1);
 
     //Connection controller
-    thread::spawn(move || {
+    tokio::spawn(async move {
         let mut client_id = 0;
         let mut get_client_id = || -> usize {
             client_id += 1;
             client_id
         };
-        for stream in listener.incoming() {
-            match stream {
-                Err(e) => println!("Connection failed: {}", e),
-                Ok(stream) => {
-                    let client_id = get_client_id();
-                    tx.send(Message::Connection(
-                        client_id,
-                        stream.try_clone().expect("Failed to clone stream"),
-                    ))
-                    .expect("Failed to send message");
-                    let client_tx = tx.clone();
-
-                    //TCP reader
-                    thread::spawn(move || {
-                        let mut reader = BufReader::new(stream);
-                        loop {
-                            let mut buf = String::new();
-                            match reader.read_line(&mut buf) {
-                                Err(_) | Ok(0) => {
-                                    client_tx
-                                        .send(Message::ConnectionReset(client_id))
-                                        .expect("Unreachable message");
-                                    break;
-                                }
-                                Ok(_) => client_tx
-                                    .send(Message::Client(client_id, buf))
-                                    .expect("Unreachable message"),
-                            };
-                        }
-                    });
-                }
+        if let Ok((stream, _)) = listener.accept().await {
+            let (read_stream, write_stream) = stream.into_split();
+            let client_id = get_client_id();
+            if tx
+                .send(Message::Connection(client_id, write_stream))
+                .await
+                .is_err()
+            {
+                panic!();
             }
+
+            let client_tx = tx.clone();
+
+            //TCP reader
+            tokio::spawn(async move {
+                loop {
+                    read_stream.readable().await.unwrap();
+                    let mut buf = vec![];
+                    match read_stream.try_read(&mut buf) {
+                        Err(_) | Ok(0) => {
+                            if client_tx
+                                .send(Message::ConnectionReset(client_id))
+                                .await
+                                .is_err()
+                            {
+                                panic!("Connection Reset");
+                            };
+                            break;
+                        }
+                        Ok(_) => {
+                            if client_tx
+                                .send(Message::Client(client_id, String::from_utf8(buf).unwrap()))
+                                .await
+                                .is_err()
+                            {
+                                panic!("Unreachable message");
+                            }
+                        }
+                    };
+                }
+            });
         }
     });
 
@@ -65,13 +74,18 @@ fn main() {
     //Initialized
     loop {
         handle_message(
-            rx.recv().expect("Failed to receive message"),
+            if let Some(msg) = rx.recv().await {
+                msg
+            } else {
+                panic!("");
+            },
             &mut client_map,
-        );
+        )
+        .await;
     }
 }
 
-fn handle_message(msg: Message, client_map: &mut HashMap<usize, TcpStream>) {
+async fn handle_message(msg: Message, client_map: &mut HashMap<usize, OwnedWriteHalf>) {
     match msg {
         Message::Connection(client_id, stream) => {
             client_map.insert(client_id, stream);
@@ -85,17 +99,20 @@ fn handle_message(msg: Message, client_map: &mut HashMap<usize, TcpStream>) {
             let msg = msg.trim();
             println!("Message from client {} : {}", id, msg);
             for client in client_map.iter() {
-                let (client_id, mut client_stream) = client;
+                let (client_id, write_stream) = client;
                 if *client_id == id {
                     continue;
                 } else {
                     let msg = format!("client {} : ", id) + msg;
                     let mut buf = Vec::from(msg);
                     buf.push(0xa);
-                    client_stream
-                        .write_all(&buf)
-                        .expect("Failed to write message");
-                    println!("Message sent to client : {}", client_id);
+                    loop {
+                        write_stream.writable().await.unwrap();
+                        write_stream
+                            .try_write(&buf)
+                            .expect("Failed to write message");
+                        println!("Message sent to client : {}", client_id);
+                    }
                 }
             }
         }
