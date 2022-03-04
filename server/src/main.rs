@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use tokio::net::{tcp::OwnedWriteHalf, TcpListener};
 use tokio::sync::mpsc;
+use tokio::task::yield_now;
 
 enum Message {
     Connection(usize, OwnedWriteHalf),
@@ -10,7 +11,7 @@ enum Message {
 
 #[tokio::main]
 async fn main() {
-    const LOCAL_HOST: &str = "SomeIPAddr";
+    const LOCAL_HOST: &str = "SomeHost";
     //Initialzation
     let listener = TcpListener::bind(LOCAL_HOST)
         .await
@@ -25,47 +26,53 @@ async fn main() {
             client_id += 1;
             client_id
         };
-        if let Ok((stream, _)) = listener.accept().await {
-            let (read_stream, write_stream) = stream.into_split();
-            let client_id = get_client_id();
-            if tx
-                .send(Message::Connection(client_id, write_stream))
-                .await
-                .is_err()
-            {
-                panic!();
-            }
-
-            let client_tx = tx.clone();
-
-            //TCP reader
-            tokio::spawn(async move {
-                loop {
-                    read_stream.readable().await.unwrap();
-                    let mut buf = vec![];
-                    match read_stream.try_read(&mut buf) {
-                        Err(_) | Ok(0) => {
-                            if client_tx
-                                .send(Message::ConnectionReset(client_id))
-                                .await
-                                .is_err()
-                            {
-                                panic!("Connection Reset");
-                            };
-                            break;
-                        }
-                        Ok(_) => {
-                            if client_tx
-                                .send(Message::Client(client_id, String::from_utf8(buf).unwrap()))
-                                .await
-                                .is_err()
-                            {
-                                panic!("Unreachable message");
-                            }
-                        }
-                    };
+        loop {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (read_stream, write_stream) = stream.into_split();
+                let client_id = get_client_id();
+                if tx
+                    .send(Message::Connection(client_id, write_stream))
+                    .await
+                    .is_err()
+                {
+                    panic!();
                 }
-            });
+
+                let client_tx = tx.clone();
+
+                //TCP reader
+                tokio::spawn(async move {
+                    loop {
+                        read_stream.readable().await.unwrap();
+                        let mut buf = [0u8; 64];
+                        match read_stream.try_read(&mut buf) {
+                            Err(_) => yield_now().await,
+                            Ok(0) => {
+                                if client_tx
+                                    .send(Message::ConnectionReset(client_id))
+                                    .await
+                                    .is_err()
+                                {
+                                    panic!("Unreachable message");
+                                };
+                                break;
+                            }
+                            Ok(_) => {
+                                if client_tx
+                                    .send(Message::Client(
+                                        client_id,
+                                        String::from_utf8(buf.to_vec()).unwrap().trim().to_string(),
+                                    ))
+                                    .await
+                                    .is_err()
+                                {
+                                    panic!("Unreachable message");
+                                }
+                            }
+                        };
+                    }
+                });
+            }
         }
     });
 
@@ -73,15 +80,12 @@ async fn main() {
 
     //Initialized
     loop {
-        handle_message(
-            if let Some(msg) = rx.recv().await {
-                msg
-            } else {
-                panic!("");
-            },
-            &mut client_map,
-        )
-        .await;
+        if let Some(msg) = rx.recv().await {
+            let msg = msg;
+            handle_message(msg, &mut client_map).await;
+        } else {
+            yield_now().await;
+        }
     }
 }
 
@@ -106,13 +110,11 @@ async fn handle_message(msg: Message, client_map: &mut HashMap<usize, OwnedWrite
                     let msg = format!("client {} : ", id) + msg;
                     let mut buf = Vec::from(msg);
                     buf.push(0xa);
-                    loop {
-                        write_stream.writable().await.unwrap();
-                        write_stream
-                            .try_write(&buf)
-                            .expect("Failed to write message");
-                        println!("Message sent to client : {}", client_id);
-                    }
+                    write_stream.writable().await.unwrap();
+                    if write_stream.try_write(&buf).is_err() {
+                        yield_now().await;
+                    };
+                    println!("Message sent to client : {}", client_id);
                 }
             }
         }
